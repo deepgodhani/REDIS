@@ -6,6 +6,7 @@
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <iostream>
 #include <stdlib.h>
 #include <string>
 #include <vector>
@@ -35,9 +36,10 @@ static int32_t read_full(SOCKET fd, uint8_t *buf, size_t n) {
     return 0;
 }
 
-static int32_t write_all(SOCKET fd, const uint8_t *buf, size_t n) {
+static int32_t write_all(SOCKET fd, const char *buf, size_t n) {
     while (n > 0) {
-        int rv = send(fd, (const char *)buf, (int)n, 0);
+        int rv = send(fd, buf, n, 0);
+        
         if (rv <= 0) {
             return -1;  // error
         }
@@ -52,14 +54,32 @@ static void buf_append(std::vector<uint8_t> &buf, const uint8_t *data, size_t le
     buf.insert(buf.end(), data, data + len);
 }
 
-const size_t k_max_msg = 32 << 20;
+const size_t k_max_msg = 4096;
 
-static int32_t send_req(SOCKET fd, const uint8_t *text, size_t len) {
-    if (len > k_max_msg) return -1;
-    std::vector<uint8_t> wbuf;
-    buf_append(wbuf, (const uint8_t *)&len, 4);
-    buf_append(wbuf, text, len);
-    return write_all(fd, wbuf.data(), wbuf.size());
+
+static int32_t send_req(SOCKET fd, const std::vector<std::string> &cmd) {
+    uint32_t len = 4;
+    for (const std::string &s : cmd) {
+        len += 4 + s.size();
+    }
+    if (len > k_max_msg) {
+        return -1;
+    }
+    char wbuf[4 + k_max_msg];
+
+    memcpy(&wbuf[0], &len, 4);  // assume little endian
+    uint32_t n = cmd.size();
+    memcpy(&wbuf[4], &n, 4);
+    size_t cur = 8;
+
+    for (const std::string &s : cmd) {
+        uint32_t p = (uint32_t)s.size();
+        memcpy(&wbuf[cur], &p, 4);
+        memcpy(&wbuf[cur + 4], s.data(), s.size());
+        cur += 4 + s.size();
+    }
+
+    return write_all(fd, wbuf, 4 + len);
 }
 
 static int32_t read_res(SOCKET fd) {
@@ -89,7 +109,7 @@ static int32_t read_res(SOCKET fd) {
     return 0;
 }
 
-int main() {
+int main(int argc, char **argv) {
     WSADATA wsaData;
     WSAStartup(MAKEWORD(2, 2), &wsaData);
 
@@ -108,21 +128,23 @@ int main() {
         die("connect()");
     }
 
-    std::vector<std::string> query_list = {
-        "hello1", "hello2", "hello3",
-        std::string(k_max_msg, 'z'),
-        "hello5",
-    };
+    std::vector<std::string> cmd;
+    for (int i = 1; i < argc; ++i) {
+        cmd.push_back(argv[i]);
+    }
+    int32_t err = send_req(fd, cmd);
+    if (err) {
+        goto L_DONE;
+    }
+    printf("Data sent: %zu bytes\n", 4 + cmd.size() * 4);
 
-    for (const std::string &s : query_list) {
-        int32_t err = send_req(fd, (const uint8_t *)s.data(), s.size());
-        if (err) goto L_DONE;
+    err = read_res(fd);
+    if (err) {
+        printf("Failed to read response from server\n");
+        goto L_DONE;
     }
 
-    for (size_t i = 0; i < query_list.size(); ++i) {
-        int32_t err = read_res(fd);
-        if (err) goto L_DONE;
-    }
+    printf("Received response from server: success\n");
 
 L_DONE:
     closesocket(fd);
